@@ -1,18 +1,8 @@
 import z80
 import ay38910
 import time
-from evdev import InputDevice, categorize, ecodes
+from evdev import InputDevice, ecodes
 import threading
-
-# OUT ($80),A
-# NOTE ... a breakpoint at 0008 causes weird problems
-OUT_ADDR = [0x000A,0x0247,0x0253,0x025A,0x026F,0x02C1,0x0309]
-
-# OUT ($40),A
-OUT_DATA = [0x000B,0x024A,0x0279,0x030C]
-
-# IN A,($40)
-IN_DATA = [0x0257,0x025E,0x02C5]
 
 MACRO_COMMANDS = {
     'KEY_2': [0x00],  # Rotary button
@@ -55,8 +45,8 @@ class FroggerSound(z80.Z80Machine):
         shifted = False
         for e in dev.read_loop():
             if e.type == ecodes.EV_KEY:
-                if e.code == 42 or e.code == 54:
-                    shifted = (e.value == 1)
+                if e.code == 42 or e.code == 54:  # Shift keys
+                    shifted = (e.value == 1)  # UP or DOWN status
                     continue
                 if e.value == 0:
                     # Only interested in key down events
@@ -66,18 +56,24 @@ class FroggerSound(z80.Z80Machine):
                     c = c.lower()
                 print(c)
                 if c == 'KEY_N':
-                    print('>>> PLAY ORIGINAL')
+                    # There is a bug in the original code that plays the main song.
+                    # This puts the bad values back in memory (reverting the fix).                    
                     self.memory[0x1065] = 0x96
                     self.memory[0x1134] = 0xDF
                 elif c=='KEY_O':
-                    print('>>> PLAY FIXED')
+                    # There is a bug in the original code that plays the main song.
+                    # This puts the fixed values in memory to play the main song. 
                     self.memory[0x1065] = 0xB6
                     self.memory[0x1134] = 0xCF
                 if c.startswith('KEY'):
+                    # For upper case keys, we have a list of sounds commands for each
                     self._do_commands += MACRO_COMMANDS.get(c,[])  
                 else:
-                    i = ord(c[-1]) - ord('a') + 5
-                    self._set_interlude = i
+                    # For lower case keys, we poke the interlude song number into
+                    # memory where the game will pick it up. Then we send the the
+                    # play-interlude command.
+                    i = ord(c[-1]) - ord('a') + 4
+                    self.memory[0x42A7] = i
                     self._do_commands += [0x08,0x0E]
 
     def __init__(self):
@@ -86,112 +82,97 @@ class FroggerSound(z80.Z80Machine):
         self.ay = ay38910.ay0
         
         with open('SoundCode.bin', 'rb') as f:
-            self.set_memory_block(0, f.read())         
-                
-        for addr in OUT_ADDR:
-            self.set_breakpoint(addr)            
-        for addr in OUT_DATA:
-            self.set_breakpoint(addr)            
-        for addr in IN_DATA:
-            self.set_breakpoint(addr)      
+            self.set_memory_block(0, f.read())     
+
+        self.set_output_callback(self.handle_OUT)
+        self.set_input_callback(self.handle_IN)           
         
-        self.set_breakpoint(0x70) # Return from interrupt   
+        # This is start of the processing tick. This is where we trigger the interrupt if there
+        # are commands to be processed. We also use this as a timing point for the 700MHz timer.
+        self.set_breakpoint(0x014D) 
 
-        self.set_breakpoint(0x014D) # Processing tick        
+        # This is the return from interrupt command. We loop back to repeat the interrupt
+        # for any queued sound commands.
+        self.set_breakpoint(0x70)                              
 
-        self.set_breakpoint(0x0B75) # Interlude
+        self._register_address = None  # The last selected AY register address
+        self._tick = False  # The 700MHz timer bit value
+        self._reg_cache = {}  # Cache of AY register values
+        
+        self._do_commands = [0x00, 0x04]  # Hopping sound at startup
+        self._set_interlude = -1  # Greater than -1 means set the interlude to this value
 
-        self._DEBUG = 0x0097
-        # self.set_breakpoint(self._DEBUG)  
-
-        self._register_address = None
-        self._tick = False
-        self._reg_cache = {}
-
-        # self._do_commands = [0x00, 0x09, 0x0A, 0x0B] # Intro song
-        #self._do_commands = [0x00, 0x0C, 0x0D]
-        self._do_commands = [0x00, 0x04]
-        self._set_interlude = -1
-
-        self._num_ticks_in_a_row = 0
-
+        # Start the thread to read the macropad key inputs
         threading.Thread(target=self.task_read_macropad).start()
+
+    def handle_OUT(self, address, value):                
+
+        address &= 0xFF
+        
+        if address == 0x80:  # Hardware: latch AY register
+            # Reads/Writes are always preceded by a register address. We'll just store that here.
+            self._register_address = value            
+        else:  # Must be 0x41, Hardware: Write AY register
+            # Cache the value for reading back            
+            self._reg_cache[self._register_address] = value
+            # Write a value to the AY register
+            self.ay.write_register(self._register_address,value)  
+
+    def handle_IN(self, _):
+        # We only ever read port 0x40 (AY register data)
+        if self._register_address == 15:
+            # AY port B is the 700MHz timer. We toggle between 0 and 8 (bit 3).
+            # There is a wait-loop in the frogger code that checks for the
+            # rising edge of this bit. We'll use a breakpoint to implement the
+            # wait. Here, we return a change every time.
+            if self._tick:
+                ret = 0x08                               
+            else:
+                ret = 0
+            self._tick = not self._tick
+        else:
+            # Any other AY register -- return the cached value. The command
+            # injector will set the cache value for AY register 14 (sound command).
+            ret = self._reg_cache[self._register_address]
+        return ret
 
     def handle_breakpoint(self):
 
-        pc = self.pc        
+        pc = self.pc              
 
-        if pc==0x0B75:
-            if self._set_interlude>=0:
-                self.a = self._set_interlude
-                self._set_interlude = -1
-            return True
+        if pc == 0x014D:
+            # Start of the timing tick. The original code waits 1/700MHz = 0.0014s.
+            # The sleep value below is a little less, but it matches the speed of the
+            # original hardware (timed against with the main intro music).
+            time.sleep(0.0012)  
 
-        if pc == 0x70:
-            # print(">>> RETURN FROM INTERRUPT")            
-            # print('>>>',self.sp)
+            # If there is one (or more) commands, take the interrupt (returns to 014E)
+            if self._do_commands:                
+                self._reg_cache[14] = self._do_commands.pop(0)
+                self.pc = 0x0038  # Interrupt service routine
+            return True   
+
+        if pc == 0x70:            
+            # This the return from the interrupt. But if there is another command, we
+            # repeat the vector to read them all.
             if self._do_commands:
                 self.pc = 0x0038 # If there is a command, repeat the interrupt
                 self._reg_cache[14] = self._do_commands.pop(0) # Next command value
                 self._last_command = self._reg_cache[14]            
             else:
-                self.pc = 0x014E # Back to where we called the interrupt
-            return True
-        if pc == 0x014D:
-            # print(">>> TICK")
-            self._num_ticks_in_a_row += 1
-            time.sleep(0.0012) 
-            if self._do_commands:
-                # If there is one (or more) commands, take the interrupt (returns to 014E)
-                self._reg_cache[14] = self._do_commands.pop(0)
-                self.pc = 0x0038
-            return True
-        
-        if pc in OUT_ADDR:
-            # Read/Writes are always preceded by a register address. We'll just store that here.
-            self._register_address = self.a
-        elif pc in OUT_DATA:
-            # Write a value to the AY register
-            self._reg_cache[self._register_address] = self.a      
-            if self._num_ticks_in_a_row > 0:
-                # print(">>> TICKS",self._num_ticks_in_a_row)
-                self._num_ticks_in_a_row = 0      
-            # print("OUT_DATA", self._register_address,self.a)    
-            self.ay.write_register(self._register_address,self.a)                               
-        elif pc in IN_DATA:
-            # Register 15 is the timer. We toggle between 0 and 8.
-            # TODO timing
-            if self._register_address == 15:
-                if self._tick:
-                    self.a = 0x08
-                    self._tick = False                                  
-                else:
-                    self.a = 0
-                    self._tick = True                
-            else:
-                # Might be a register value we cached or it might be the sound command
-                # We handle sound commands elsewhere
-                self.a = self._reg_cache[self._register_address]                            
-        
-        if self.pc == self._DEBUG:
-            print(">>> DEBUG STOP",hex(pc),self.a)
-            return False
+                # Back to where we called the interrupt
+                self.pc = 0x014E 
+            return True        
                  
-        return True
+        return False
 
 
 m = FroggerSound()
-m.pc = 0x0000
-
-# for i in range(50000):
-#     print(">>>",hex(m.pc))
-#     m.ticks_to_stop = 1
-#     events = m.run()
-#     if events & m._BREAKPOINT_HIT:        
-#         raise "BREAKPOINT"
+m.pc = 0x0000  # Startup goes to address 0x0000
 
 while True:   
     events = m.run()
+    # Run until we hit an unhandled breakpoint
     if events & m._BREAKPOINT_HIT:        
         if not m.handle_breakpoint():
             break

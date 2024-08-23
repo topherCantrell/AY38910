@@ -193,7 +193,7 @@ def race_car():
     ay.write_register(0o10,0o000)
     ay.write_register(0o11,0o000)
 
-# gunshot()
+gunshot()
 # explosion()
 # wolf_whistle()
-race_car()
+# race_car()

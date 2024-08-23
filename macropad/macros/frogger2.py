@@ -9,7 +9,7 @@ app = {                      # REQUIRED dict, must be named 'app'
         # 1st row ----------
         (0x004000, 'Intro', ['M']),
         (0x004000, 'Main', ['N']),
-        (0x004000, 'Full', ['O']),
+        (0x004000, 'Fixed', ['O']),
         # 2nd row ----------
         (0x004000, 'Over', ['P']),
         (0x004040, 'Next', ['Q']),
