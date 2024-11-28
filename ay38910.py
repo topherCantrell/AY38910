@@ -45,14 +45,14 @@ class AY38910:
         return ret    
 
     def write_register(self,address,value):
-        self.write_data_pins(address)
-        GPIO.output(self.pin_bc1,1)
-        GPIO.output(self.pin_bc1,0)
-        self.write_data_pins(value)
-        GPIO.output(self.pin_bc2,1)
-        GPIO.output(self.pin_bdir,1)
-        GPIO.output(self.pin_bdir,0)
-        GPIO.output(self.pin_bc2,0)    
+        self.write_data_pins(address)  # Address to data bus
+        GPIO.output(self.pin_bc1,1)    # BC1:BC2:BDIR = 1:0:0 LATCH
+        GPIO.output(self.pin_bc1,0)    # BC1:BC2:BDIR = 0:0:0 idle
+        self.write_data_pins(value)    # Value to data bus
+        GPIO.output(self.pin_bc2,1)    # BC1:BC2:BDIR = 0:1:0 idle
+        GPIO.output(self.pin_bdir,1)   # BC1:BC2:BDIR = 0:1:1 WRITE
+        GPIO.output(self.pin_bdir,0)   # BC1:BC2:BDIR = 0:1:0 idle
+        GPIO.output(self.pin_bc2,0)    # BC1:BC2:BDIR = 0:0:0 idle
 
     def read_register(self,address):        
         self.write_data_pins(address)

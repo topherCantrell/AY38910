@@ -4,6 +4,8 @@ import time
 from evdev import InputDevice, ecodes
 import threading
 
+import RPi.GPIO as GPIO
+
 MACRO_COMMANDS = {
     'KEY_2': [0x00],  # Rotary button
     'KEY_3': [0x00],  # Rotary button
@@ -80,6 +82,10 @@ class FroggerSound(z80.Z80Machine):
         super().__init__()
 
         self.ay = ay38910.ay0
+
+        GPIO.setup(16, GPIO.OUT)
+        GPIO.output(16, 0)
+        self.debug_pin_state = 0
         
         with open('SoundCode.bin', 'rb') as f:
             self.set_memory_block(0, f.read())     
@@ -138,6 +144,9 @@ class FroggerSound(z80.Z80Machine):
 
     def handle_breakpoint(self):
 
+        GPIO.output(16, self.debug_pin_state)
+        self.debug_pin_state = not self.debug_pin_state
+        
         pc = self.pc              
 
         if pc == 0x014D:
